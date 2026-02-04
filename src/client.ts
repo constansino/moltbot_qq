@@ -75,7 +75,7 @@ export class OneBotClient extends EventEmitter {
     this.send("send_group_msg", { group_id: groupId, message });
   }
 
-  async getMsg(messageId: number): Promise<any> {
+  async getMsg(messageId: number | string): Promise<any> {
     return this.sendWithResponse("get_msg", { message_id: messageId });
   }
 

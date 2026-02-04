@@ -48,14 +48,31 @@ function hasReplySegment(message: OneBotMessage | string | undefined): boolean {
 }
 
 /**
- * Get reply message ID from message segments
+ * Clean CQ codes from message text
+ * Removes [CQ:xxx,...] format and normalizes whitespace
  */
-function getReplyMessageId(message: OneBotMessage | string | undefined): number | null {
+function cleanCQCodes(text: string | undefined): string {
+  if (!text) return "";
+  return text
+    .replace(/\[CQ:[^\]]+\]/g, "")  // Remove CQ codes
+    .replace(/\s+/g, " ")            // Normalize whitespace
+    .trim();
+}
+
+/**
+ * Get reply message ID from message segments
+ * Returns string to avoid type conversion issues
+ */
+function getReplyMessageId(message: OneBotMessage | string | undefined): string | null {
   if (!message || typeof message === "string") return null;
   
   for (const segment of message) {
     if (segment.type === "reply" && segment.data?.id) {
-      return parseInt(segment.data.id, 10);
+      const id = String(segment.data.id).trim();
+      // Validate: must be numeric string (not NaN or empty)
+      if (id && /^-?\d+$/.test(id)) {
+        return id;
+      }
     }
   }
   return null;
@@ -236,9 +253,10 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             // Extract images from current message (max 3, newest first)
             let mediaUrls: string[] = extractImageUrls(event.message, 3);
             
-            // If message is a reply and no images in current message, check replied message
-            if (replyMsgId && mediaUrls.length === 0 && repliedMsg?.message) {
-                mediaUrls = extractImageUrls(repliedMsg.message, 3);
+            // If there's space, also extract images from replied message
+            if (mediaUrls.length < 3 && replyMsgId && repliedMsg?.message) {
+                const repliedImages = extractImageUrls(repliedMsg.message, 3 - mediaUrls.length);
+                mediaUrls = [...mediaUrls, ...repliedImages];
             }
 
             const runtime = getQQRuntime();
@@ -275,13 +293,19 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 ReplyToSenderName?: string;
             } = {};
             
-            if (replyMsgId && repliedMsg) {
-                replyContext.ReplyToMessageId = String(replyMsgId);
-                replyContext.ReplyToBody = typeof repliedMsg.message === 'string'
-                    ? repliedMsg.message
-                    : repliedMsg.raw_message || '';
-                replyContext.ReplyToSenderId = String(repliedMsg.sender?.user_id || '');
-                replyContext.ReplyToSenderName = repliedMsg.sender?.nickname || repliedMsg.sender?.card || '';
+            if (replyMsgId) {
+                replyContext.ReplyToMessageId = replyMsgId;
+                if (repliedMsg) {
+                    const rawBody = typeof repliedMsg.message === 'string'
+                        ? repliedMsg.message
+                        : repliedMsg.raw_message || '';
+                    replyContext.ReplyToBody = cleanCQCodes(rawBody);
+                    replyContext.ReplyToSenderId = String(repliedMsg.sender?.user_id || '');
+                    replyContext.ReplyToSenderName = repliedMsg.sender?.nickname || repliedMsg.sender?.card || '';
+                } else {
+                    // Failed to fetch replied message
+                    replyContext.ReplyToBody = "[无法获取被引用的消息]";
+                }
             }
 
             const ctxPayload = runtime.channel.reply.finalizeInboundContext({
@@ -335,39 +359,61 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
     },
   },
   outbound: {
-    sendText: async ({ to, text, accountId }) => {
+    sendText: async ({ to, text, accountId, replyTo }) => {
         const client = getClientForAccount(accountId || DEFAULT_ACCOUNT_ID);
         if (!client) {
             console.warn(`[QQ] No client for account ${accountId}, cannot send text`);
             return { channel: "qq", sent: false, error: "Client not connected" };
         }
 
+        // Construct message: add reply segment if replyTo is provided
+        let message: OneBotMessage | string = text;
+        if (replyTo) {
+            message = [
+                { type: "reply", data: { id: String(replyTo) } },
+                { type: "text", data: { text } }
+            ];
+        }
+
         if (to.startsWith("group:")) {
             const groupId = parseInt(to.replace("group:", ""), 10);
-            client.sendGroupMsg(groupId, text);
+            client.sendGroupMsg(groupId, message);
         } else {
             const userId = parseInt(to, 10);
-            client.sendPrivateMsg(userId, text);
+            client.sendPrivateMsg(userId, message);
         }
         
         return { channel: "qq", sent: true };
     },
-    sendMedia: async ({ to, text, mediaUrl, accountId }) => {
+    sendMedia: async ({ to, text, mediaUrl, accountId, replyTo }) => {
          const client = getClientForAccount(accountId || DEFAULT_ACCOUNT_ID);
          if (!client) {
             console.warn(`[QQ] No client for account ${accountId}, cannot send media`);
             return { channel: "qq", sent: false, error: "Client not connected" };
          }
 
-         const cqImage = `[CQ:image,file=${mediaUrl}]`;
-         const msg = text ? `${text}\n${cqImage}` : cqImage;
+         // Construct message array for proper reply support
+         const message: OneBotMessage = [];
+         
+         // Add reply segment if replyTo is provided
+         if (replyTo) {
+             message.push({ type: "reply", data: { id: String(replyTo) } });
+         }
+         
+         // Add text if provided
+         if (text) {
+             message.push({ type: "text", data: { text } });
+         }
+         
+         // Add image
+         message.push({ type: "image", data: { file: mediaUrl } });
 
          if (to.startsWith("group:")) {
              const groupId = parseInt(to.replace("group:", ""), 10);
-             client.sendGroupMsg(groupId, msg);
+             client.sendGroupMsg(groupId, message);
          } else {
              const userId = parseInt(to, 10);
-             client.sendPrivateMsg(userId, msg);
+             client.sendPrivateMsg(userId, message);
          }
          return { channel: "qq", sent: true };
     }
