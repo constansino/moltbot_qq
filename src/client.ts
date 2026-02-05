@@ -141,6 +141,12 @@ export class OneBotClient extends EventEmitter {
   async getGuildServiceProfile(): Promise<any> {
       try { return await this.sendWithResponse("get_guild_service_profile", {}); } catch { return null; }
   }
+
+  sendGroupPoke(groupId: number, userId: number) {
+      this.send("group_poke", { group_id: groupId, user_id: userId });
+      // Note: Some implementations use send_poke or touch
+      // Standard OneBot v11 doesn't enforce poke API, but group_poke is common in go-cqhttp
+  }
   // --------------------------------------
 
   setGroupBan(groupId: number, userId: number, duration: number = 1800) {
