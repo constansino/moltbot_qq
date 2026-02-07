@@ -36,18 +36,30 @@ function setCachedMemberName(groupId: string, userId: string, name: string) {
 }
 
 function extractImageUrls(message: OneBotMessage | string | undefined, maxImages = 3): string[] {
-  if (!message || typeof message === "string") return [];
-  
   const urls: string[] = [];
-  for (const segment of message) {
-    if (segment.type === "image") {
-      const url = segment.data?.url || (typeof segment.data?.file === 'string' && segment.data.file.startsWith('http') ? segment.data.file : undefined);
-      if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
-        urls.push(url);
+  
+  if (Array.isArray(message)) {
+    for (const segment of message) {
+      if (segment.type === "image") {
+        const url = segment.data?.url || (typeof segment.data?.file === 'string' && (segment.data.file.startsWith('http') || segment.data.file.startsWith('base64://')) ? segment.data.file : undefined);
+        if (url) {
+          urls.push(url);
+          if (urls.length >= maxImages) break;
+        }
+      }
+    }
+  } else if (typeof message === "string") {
+    const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
+    let match;
+    while ((match = imageRegex.exec(message)) !== null) {
+      const val = match[1].replace(/&amp;/g, "&");
+      if (val.startsWith("http") || val.startsWith("base64://")) {
+        urls.push(val);
         if (urls.length >= maxImages) break;
       }
     }
   }
+  
   return urls;
 }
 
