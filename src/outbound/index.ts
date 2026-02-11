@@ -53,10 +53,12 @@ export function createQQOutbound(opts: {
       if (!client) return { channel: "qq", sent: false, error: "Client not connected" };
 
       const runtimeCfg = accountConfigs.get(accountId || DEFAULT_ACCOUNT_ID) || accountConfigs.get(DEFAULT_ACCOUNT_ID) || {};
-
       const hostSharedDir = typeof runtimeCfg.sharedMediaHostDir === "string" ? runtimeCfg.sharedMediaHostDir.trim() : "";
       const containerSharedDirRaw = typeof runtimeCfg.sharedMediaContainerDir === "string" ? runtimeCfg.sharedMediaContainerDir.trim() : "";
       const containerSharedDir = containerSharedDirRaw || "/openclaw_media";
+
+      const hasText = Boolean(text && text.trim());
+      const textValue = text?.trim() || "";
 
       const audioLikeSource = isAudioFile(mediaUrl);
       let stagedAudioFile: string | null = null;
@@ -67,66 +69,96 @@ export function createQQOutbound(opts: {
             const copiedName = await ensureFileInSharedMedia(localSourcePath, hostSharedDir);
             stagedAudioFile = path.posix.join(containerSharedDir.replace(/\\/g, "/"), copiedName);
           } catch (err) {
-            console.warn(`[QQ] Failed to stage source audio into shared media dir: ${String(err)}`);
+            console.warn("[QQ] Failed to stage source audio into shared media dir:", err);
           }
         }
       }
 
       const finalUrl = await resolveMediaUrl(mediaUrl);
-
-      let textAck: any = null;
-      if (text && text.trim()) {
-        const textMessage: OneBotMessage = [];
-        if (replyTo) textMessage.push({ type: "reply", data: { id: String(replyTo) } });
-        textMessage.push({ type: "text", data: { text } });
-        const ack = await sendOneBotMessageWithAck(client, to, textMessage);
-        if (!ack.ok) {
-          return { channel: "qq", sent: false, error: `Text send failed: ${ack.error || "unknown"}` };
-        }
-        textAck = ack.data;
-      }
-
-      const mediaMessage: OneBotMessage = [];
-      if (replyTo && !(text && text.trim())) mediaMessage.push({ type: "reply", data: { id: String(replyTo) } });
       const sourceAudioLike = isAudioFile(mediaUrl);
       const sourceImageLike = isImageFile(mediaUrl);
       const audioLike = sourceAudioLike || isAudioFile(finalUrl);
       const imageLike = !audioLike && (sourceImageLike || isImageFile(finalUrl) || finalUrl.startsWith("base64://"));
 
-      if (audioLike && textAck) {
-        const configuredDelay = Number(runtimeCfg.rateLimitMs ?? 1000);
-        const delayMs = Number.isFinite(configuredDelay) ? Math.max(1200, configuredDelay) : 1200;
-        await sleep(delayMs);
-      }
-
-      if (imageLike) mediaMessage.push({ type: "image", data: { file: finalUrl } });
-      else if (audioLike) {
+      const stageAudioRecordIfNeeded = async (): Promise<string> => {
         let recordFile = stagedAudioFile || finalUrl;
-        if (!finalUrl.startsWith("base64://") && hostSharedDir) {
+        if (!recordFile.startsWith("base64://") && hostSharedDir) {
           try {
-            const localPath = finalUrl.startsWith("file:") ? fileURLToPath(finalUrl) : finalUrl;
+            const localPath = recordFile.startsWith("file:") ? fileURLToPath(recordFile) : recordFile;
             const copiedName = await ensureFileInSharedMedia(localPath, hostSharedDir);
             recordFile = path.posix.join(containerSharedDir.replace(/\\/g, "/"), copiedName);
           } catch (err) {
-            console.warn(`[QQ] Failed to stage audio into shared media dir: ${String(err)}`);
+            console.warn("[QQ] Failed to stage audio into shared media dir:", err);
           }
         }
-        mediaMessage.push({ type: "record", data: { file: recordFile } });
-      } else {
-        mediaMessage.push({ type: "file", data: { file: finalUrl } });
+        return recordFile;
+      };
+
+      const buildMediaOnlyMessage = async (): Promise<OneBotMessage> => {
+        const message: OneBotMessage = [];
+        if (audioLike) {
+          const recordFile = await stageAudioRecordIfNeeded();
+          message.push({ type: "record", data: { file: recordFile } });
+        } else if (imageLike) {
+          message.push({ type: "image", data: { file: finalUrl } });
+        } else {
+          message.push({ type: "file", data: { file: finalUrl } });
+        }
+        return message;
+      };
+
+      // Try old behavior first: send text + media in a single QQ message.
+      const combinedMessage: OneBotMessage = [];
+      if (replyTo) combinedMessage.push({ type: "reply", data: { id: String(replyTo) } });
+      if (hasText) combinedMessage.push({ type: "text", data: { text: textValue } });
+      combinedMessage.push(...(await buildMediaOnlyMessage()));
+
+      const combinedAck = await sendOneBotMessageWithAck(client, to, combinedMessage);
+      if (combinedAck.ok) {
+        return {
+          channel: "qq",
+          sent: true,
+          textSent: hasText,
+          mediaSent: true,
+          messageId: combinedAck.data?.message_id ?? combinedAck.data?.messageId ?? null,
+        };
       }
 
-      const mediaAck = await sendOneBotMessageWithAck(client, to, mediaMessage);
+      // Fallback path: split text/media only if combined send fails.
+      let textAck: any = null;
+      if (hasText) {
+        const textOnly: OneBotMessage = [];
+        if (replyTo) textOnly.push({ type: "reply", data: { id: String(replyTo) } });
+        textOnly.push({ type: "text", data: { text: textValue } });
+        const ack = await sendOneBotMessageWithAck(client, to, textOnly);
+        if (!ack.ok) {
+          return {
+            channel: "qq",
+            sent: false,
+            error: `Combined send failed (${combinedAck.error || "unknown"}), and text fallback failed (${ack.error || "unknown"})`,
+            textSent: false,
+            mediaSent: false,
+          };
+        }
+        textAck = ack.data;
+      }
+
+      const mediaOnly = await buildMediaOnlyMessage();
+      if (replyTo && !hasText) {
+        mediaOnly.unshift({ type: "reply", data: { id: String(replyTo) } });
+      }
+
+      const mediaAck = await sendOneBotMessageWithAck(client, to, mediaOnly);
       if (!mediaAck.ok) {
         if (audioLike) {
           const fileFallback: OneBotMessage = [];
-          if (replyTo && !(text && text.trim())) fileFallback.push({ type: "reply", data: { id: String(replyTo) } });
+          if (replyTo && !hasText) fileFallback.push({ type: "reply", data: { id: String(replyTo) } });
           let fallbackFile = stagedAudioFile || finalUrl;
           if (fallbackFile.startsWith("base64://")) {
             return {
               channel: "qq",
               sent: Boolean(textAck),
-              error: `Media send failed: ${mediaAck.error || "unknown"}`,
+              error: `Combined send failed (${combinedAck.error || "unknown"}); media send failed: ${mediaAck.error || "unknown"}`,
               textSent: Boolean(textAck),
               mediaSent: false,
               messageId: textAck?.message_id ?? textAck?.messageId ?? null,
@@ -138,7 +170,7 @@ export function createQQOutbound(opts: {
               const copiedName = await ensureFileInSharedMedia(localPath, hostSharedDir);
               fallbackFile = path.posix.join(containerSharedDir.replace(/\\/g, "/"), copiedName);
             } catch (err) {
-              console.warn(`[QQ] Failed to stage fallback audio file into shared media dir: ${String(err)}`);
+              console.warn("[QQ] Failed to stage fallback audio file into shared media dir:", err);
             }
           }
           fileFallback.push({ type: "file", data: { file: fallbackFile } });
@@ -151,25 +183,21 @@ export function createQQOutbound(opts: {
               mediaSent: false,
               fallbackSent: true,
               fallbackType: "file",
-              error: `Audio(record) failed; fallback file sent. reason=${mediaAck.error || "unknown"}`,
-              messageId:
-                fallbackAck.data?.message_id ??
-                fallbackAck.data?.messageId ??
-                textAck?.message_id ??
-                textAck?.messageId ??
-                null,
+              error: `Combined send failed (${combinedAck.error || "unknown"}); audio(record) failed and fallback file sent. reason=${mediaAck.error || "unknown"}`,
+              messageId: fallbackAck.data?.message_id ?? fallbackAck.data?.messageId ?? textAck?.message_id ?? textAck?.messageId ?? null,
             };
           }
         }
         return {
           channel: "qq",
           sent: Boolean(textAck),
-          error: `Media send failed: ${mediaAck.error || "unknown"}`,
+          error: `Combined send failed (${combinedAck.error || "unknown"}); media send failed: ${mediaAck.error || "unknown"}`,
           textSent: Boolean(textAck),
           mediaSent: false,
           messageId: textAck?.message_id ?? textAck?.messageId ?? null,
         };
       }
+
       return {
         channel: "qq",
         sent: true,
