@@ -145,7 +145,7 @@ export class OneBotClient extends EventEmitter {
   }
 
   async sendPrivateMsgAck(userId: number, message: OneBotMessage | string): Promise<any> {
-    return this.sendWithResponse("send_private_msg", { user_id: userId, message });
+    return this.sendWithResponse("send_private_msg", { user_id: userId, message }, 15000);
   }
 
   sendGroupMsg(groupId: number, message: OneBotMessage | string) {
@@ -153,7 +153,7 @@ export class OneBotClient extends EventEmitter {
   }
 
   async sendGroupMsgAck(groupId: number, message: OneBotMessage | string): Promise<any> {
-    return this.sendWithResponse("send_group_msg", { group_id: groupId, message });
+    return this.sendWithResponse("send_group_msg", { group_id: groupId, message }, 15000);
   }
 
   deleteMsg(messageId: number | string) {
@@ -199,7 +199,7 @@ export class OneBotClient extends EventEmitter {
   }
 
   async sendGuildChannelMsgAck(guildId: string, channelId: string, message: OneBotMessage | string): Promise<any> {
-    return this.sendWithResponse("send_guild_channel_msg", { guild_id: guildId, channel_id: channelId, message });
+    return this.sendWithResponse("send_guild_channel_msg", { guild_id: guildId, channel_id: channelId, message }, 15000);
   }
 
   async getGuildList(): Promise<any[]> {
@@ -231,7 +231,7 @@ export class OneBotClient extends EventEmitter {
     this.send("set_group_kick", { group_id: groupId, user_id: userId, reject_add_request: rejectAddRequest });
   }
 
-  private sendWithResponse(action: string, params: any): Promise<any> {
+  private sendWithResponse(action: string, params: any, timeoutMs: number = 5000): Promise<any> {
     return new Promise((resolve, reject) => {
       if (this.ws?.readyState !== WebSocket.OPEN) {
         reject(new Error("WebSocket not open"));
@@ -258,11 +258,11 @@ export class OneBotClient extends EventEmitter {
       this.ws.on("message", handler);
       this.ws.send(JSON.stringify({ action, params, echo }));
 
-      // Timeout after 5 seconds
+      // Timeout guard
       setTimeout(() => {
         this.ws?.off("message", handler);
         reject(new Error("Request timeout"));
-      }, 5000);
+      }, timeoutMs);
     });
   }
 

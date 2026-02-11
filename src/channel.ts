@@ -983,6 +983,24 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 
          const mediaAck = await sendOneBotMessageWithAck(client, to, mediaMessage);
          if (!mediaAck.ok) {
+             if (audioLike) {
+                 const fileFallback: OneBotMessage = [];
+                 if (replyTo && !(text && text.trim())) fileFallback.push({ type: "reply", data: { id: String(replyTo) } });
+                 fileFallback.push({ type: "file", data: { file: finalUrl } });
+                 const fallbackAck = await sendOneBotMessageWithAck(client, to, fileFallback);
+                 if (fallbackAck.ok) {
+                     return {
+                         channel: "qq",
+                         sent: true,
+                         textSent: Boolean(textAck),
+                         mediaSent: false,
+                         fallbackSent: true,
+                         fallbackType: "file",
+                         error: `Audio(record) failed; fallback file sent. reason=${mediaAck.error || "unknown"}`,
+                         messageId: fallbackAck.data?.message_id ?? fallbackAck.data?.messageId ?? textAck?.message_id ?? textAck?.messageId ?? null,
+                     };
+                 }
+             }
              return {
                  channel: "qq",
                  sent: Boolean(textAck),
