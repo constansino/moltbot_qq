@@ -354,10 +354,13 @@ export async function handleQQInboundMessage(ctx: any): Promise<void> {
                      if (config.antiRiskMode) processed = processAntiRisk(processed);
                      processed = await resolveInlineCqRecord(processed);
 
-                     const paragraphParts = processed
-                        .split(/\n\s*\n+/)
-                        .map((part) => part.trim())
-                        .filter(Boolean);
+                     const splitOnBlankLine = Boolean(config.splitOnBlankLine ?? true);
+                     const paragraphParts = splitOnBlankLine
+                        ? processed
+                            .split(/\n\s*\n+/)
+                            .map((part) => part.trim())
+                            .filter(Boolean)
+                        : [];
                      const sendUnits = paragraphParts.length > 0 ? paragraphParts : [processed.trim() || processed];
                      const outboundChunks: string[] = [];
                      for (const unit of sendUnits) {
