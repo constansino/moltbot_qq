@@ -142,6 +142,17 @@ function normalizeNumericIdList(values: Array<string | number> | undefined): num
     return out;
 }
 
+function parseIdListInput(values: string | Array<string | number> | undefined): number[] {
+    if (typeof values === "string") {
+        const parts = values
+            .split(/[\n,，;；\s]+/)
+            .map((part) => part.trim())
+            .filter(Boolean);
+        return normalizeNumericIdList(parts);
+    }
+    return normalizeNumericIdList(values);
+}
+
 function getClientForAccount(accountId: string) {
     return clients.get(accountId);
 }
@@ -397,9 +408,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
     startAccount: async (ctx) => {
         const { account, cfg } = ctx;
         const config = account.config;
-        const adminIds = normalizeNumericIdList(config.admins as Array<string | number> | undefined);
-        const allowedGroupIds = normalizeNumericIdList(config.allowedGroups as Array<string | number> | undefined);
-        const blockedUserIds = normalizeNumericIdList(config.blockedUsers as Array<string | number> | undefined);
+        const adminIds = [...new Set(parseIdListInput(config.admins as string | Array<string | number> | undefined))];
+        const allowedGroupIds = [...new Set(parseIdListInput(config.allowedGroups as string | Array<string | number> | undefined))];
+        const blockedUserIds = [...new Set(parseIdListInput(config.blockedUsers as string | Array<string | number> | undefined))];
 
         if (!config.wsUrl) throw new Error("QQ: wsUrl is required");
 
