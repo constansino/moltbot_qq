@@ -214,6 +214,11 @@ function isImageFile(url: string): boolean {
     return lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.gif') || lower.endsWith('.webp');
 }
 
+function isAudioFile(url: string): boolean {
+    const lower = url.toLowerCase();
+    return lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.m4a') || lower.endsWith('.ogg') || lower.endsWith('.flac') || lower.endsWith('.aac');
+}
+
 function splitMessage(text: string, limit: number): string[] {
     if (text.length <= limit) return [text];
     const chunks = [];
@@ -275,6 +280,25 @@ async function resolveMediaUrl(url: string): Promise<string> {
     }
 
     return url;
+}
+
+async function resolveInlineCqRecord(text: string): Promise<string> {
+    const regex = /\[CQ:record,([^\]]*)\]/g;
+    let result = text;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(text)) !== null) {
+        const whole = match[0];
+        const params = match[1];
+        const fileMatch = params.match(/(?:^|,)file=([^,]+)/);
+        if (!fileMatch) continue;
+        const rawFile = fileMatch[1].trim();
+        const decoded = rawFile.replace(/&amp;/g, "&");
+        const converted = await resolveMediaUrl(decoded);
+        if (converted === decoded) continue;
+        const nextParams = params.replace(fileMatch[1], converted);
+        result = result.replace(whole, `[CQ:record,${nextParams}]`);
+    }
+    return result;
 }
 
 export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
@@ -741,6 +765,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                      let processed = msg;
                      if (config.formatMarkdown) processed = stripMarkdown(processed);
                      if (config.antiRiskMode) processed = processAntiRisk(processed);
+                     processed = await resolveInlineCqRecord(processed);
                      const chunks = splitMessage(processed, config.maxMessageLength || 4000);
                      for (let i = 0; i < chunks.length; i++) {
                          let chunk = chunks[i];
@@ -771,6 +796,11 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                                  if (isGroup) client.sendGroupMsg(groupId, imgMsg);
                                  else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, imgMsg);
                                  else client.sendPrivateMsg(userId, imgMsg);
+                             } else if (isAudioFile(url) || isAudioFile(f.url)) {
+                                 const audioMsg = `[CQ:record,file=${url}]`;
+                                 if (isGroup) client.sendGroupMsg(groupId, audioMsg);
+                                 else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, `[语音] ${url}`);
+                                 else client.sendPrivateMsg(userId, audioMsg);
                              } else {
                                  const txtMsg = `[CQ:file,file=${url},name=${f.name || 'file'}]`;
                                  if (isGroup) client.sendGroupMsg(groupId, txtMsg);
@@ -838,7 +868,8 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
     sendText: async ({ to, text, accountId, replyTo }) => {
         const client = getClientForAccount(accountId || DEFAULT_ACCOUNT_ID);
         if (!client) return { channel: "qq", sent: false, error: "Client not connected" };
-        const chunks = splitMessage(text, 4000);
+        const normalizedText = await resolveInlineCqRecord(text);
+        const chunks = splitMessage(normalizedText, 4000);
         for (let i = 0; i < chunks.length; i++) {
             let message: OneBotMessage | string = chunks[i];
             if (replyTo && i === 0) message = [ { type: "reply", data: { id: String(replyTo) } }, { type: "text", data: { text: chunks[i] } } ];
@@ -864,8 +895,10 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
          if (replyTo) message.push({ type: "reply", data: { id: String(replyTo) } });
          if (text) message.push({ type: "text", data: { text } });
          const imageLike = isImageFile(mediaUrl) || isImageFile(finalUrl) || finalUrl.startsWith("base64://");
+         const audioLike = isAudioFile(mediaUrl) || isAudioFile(finalUrl);
          if (imageLike) message.push({ type: "image", data: { file: finalUrl } });
-         else message.push({ type: "text", data: { text: `[CQ:file,file=${finalUrl},url=${finalUrl}]` } });
+         else if (audioLike) message.push({ type: "record", data: { file: finalUrl } });
+         else message.push({ type: "file", data: { file: finalUrl } });
          
          if (to.startsWith("group:")) client.sendGroupMsg(parseInt(to.replace("group:", ""), 10), message);
          else if (to.startsWith("guild:")) {
