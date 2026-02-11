@@ -100,6 +100,9 @@ openclaw setup qq
       "notifyNonAdminBlocked": false,
       "nonAdminBlockedMessage": "当前仅管理员可触发机器人。\n如需使用请联系管理员。",
       "blockedNotifyCooldownMs": 10000,
+      "showProcessingStatus": true,
+      "processingStatusDelayMs": 500,
+      "processingStatusText": "输入中",
       "allowedGroups": "10001,10002",
       "blockedUsers": "999999",
       "systemPrompt": "你是一个名为“人工智障”的QQ机器人，说话风格要风趣幽默。",
@@ -133,6 +136,9 @@ openclaw setup qq
 | `notifyNonAdminBlocked` | boolean | `false` | 当 `adminOnlyChat=true` 且被非管理员触发时，是否发送提示消息。 |
 | `nonAdminBlockedMessage` | string | `当前仅管理员可触发机器人。\n如需使用请联系管理员。` | 非管理员被拦截时的提示文案。 |
 | `blockedNotifyCooldownMs` | number | `10000` | 非管理员提示防抖（毫秒）。同一用户在同一会话内重复触发时，冷却期内不重复提示。 |
+| `showProcessingStatus` | boolean | `true` | 忙碌状态可视化（默认开启）。处理中会把机器人群名片临时改为 `（输入中）` 后缀。 |
+| `processingStatusDelayMs` | number | `500` | 触发“输入中”后缀的延迟毫秒数。 |
+| `processingStatusText` | string | `输入中` | 忙碌后缀文本，默认 `输入中`。 |
 | `requireMention` | boolean | `true` | **群聊触发门槛**。`true`=仅在被 @ / 回复机器人 / 命中关键词时触发；`false`=普通群消息也可能触发（不建议长期关闭）。 |
 | `allowedGroups` | string | `""` | **群组白名单（字符串）**。Web表单填：`883766069 123456789`；Raw JSON 填：`"883766069 123456789"`。若设置，Bot 仅在这些群组响应。 |
 | `blockedUsers` | string | `""` | **用户黑名单（字符串）**。Web表单填：`342571216` 或 `342571216,10002`；Raw JSON 填：`"342571216"`。Bot 将忽略这些用户消息。 |
