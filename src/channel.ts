@@ -124,6 +124,8 @@ const clients = new Map<string, OneBotClient>();
 const accountConfigs = new Map<string, QQConfig>();
 const blockedNotifyCache = new Map<string, number>();
 const activeTaskIds = new Set<string>();
+const groupBusyCounters = new Map<string, number>();
+const groupBaseCards = new Map<string, string>();
 
 function normalizeNumericId(value: string | number | undefined | null): number | null {
     if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
@@ -199,6 +201,47 @@ function countActiveTasksForAccount(accountId: string): number {
         if (taskId.startsWith(prefix)) count += 1;
     }
     return count;
+}
+
+async function setGroupTypingCard(client: OneBotClient, accountId: string, groupId: number, busySuffix: string): Promise<void> {
+    const selfId = client.getSelfId();
+    if (!selfId) return;
+    const groupKey = `${accountId}:group:${groupId}`;
+    const current = groupBusyCounters.get(groupKey) || 0;
+    const next = current + 1;
+    groupBusyCounters.set(groupKey, next);
+
+    if (current > 0) return;
+
+    try {
+        const info = await (client as any).sendWithResponse("get_group_member_info", { group_id: groupId, user_id: selfId, no_cache: true });
+        const baseCard = (info?.card || info?.nickname || "").trim();
+        groupBaseCards.set(groupKey, baseCard);
+        const suffix = (busySuffix || "输入中").trim();
+        const nextCard = baseCard ? `${baseCard}(${suffix})` : `(${suffix})`;
+        client.setGroupCard(groupId, selfId, nextCard);
+    } catch (err) {
+        console.warn(`[QQ] Failed to set busy group card: ${String(err)}`);
+    }
+}
+
+function clearGroupTypingCard(client: OneBotClient, accountId: string, groupId: number): void {
+    const selfId = client.getSelfId();
+    if (!selfId) return;
+    const groupKey = `${accountId}:group:${groupId}`;
+    const current = groupBusyCounters.get(groupKey) || 0;
+    if (current <= 1) {
+        groupBusyCounters.delete(groupKey);
+        const baseCard = groupBaseCards.get(groupKey) || "";
+        groupBaseCards.delete(groupKey);
+        try {
+            client.setGroupCard(groupId, selfId, baseCard);
+        } catch (err) {
+            console.warn(`[QQ] Failed to restore group card: ${String(err)}`);
+        }
+        return;
+    }
+    groupBusyCounters.set(groupKey, current - 1);
 }
 
 function getClientForAccount(accountId: string | undefined | null) {
@@ -1040,43 +1083,25 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 onRecordError: (err) => console.error("QQ Session Error:", err)
             });
 
-            let processingStartAt = 0;
             let processingDelayTimer: NodeJS.Timeout | null = null;
-            let processingPulseTimer: NodeJS.Timeout | null = null;
-            let processingStartedNoticeSent = false;
+            let typingCardActivated = false;
             const taskKey = buildTaskKey(account.accountId, isGroup, isGuild, groupId, guildId, channelId, userId);
-
-            const sendProcessingStatus = (message: string) => {
-                if (!message || !message.trim()) return;
-                if (isGroup) client.sendGroupMsg(groupId, `[CQ:at,qq=${userId}] ${message}`);
-                else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, message);
-                else client.sendPrivateMsg(userId, message);
-            };
 
             const clearProcessingTimers = () => {
                 if (processingDelayTimer) {
                     clearTimeout(processingDelayTimer);
                     processingDelayTimer = null;
                 }
-                if (processingPulseTimer) {
-                    clearInterval(processingPulseTimer);
-                    processingPulseTimer = null;
-                }
             };
 
             if (config.showProcessingStatus !== false) {
-                processingStartAt = Date.now();
                 activeTaskIds.add(taskKey);
-                const delayMs = Math.max(1000, Number(config.processingStatusDelayMs ?? 12000));
-                const pulseMs = Math.max(5000, Number(config.processingStatusIntervalMs ?? 30000));
+                const delayMs = Math.max(100, Number(config.processingStatusDelayMs ?? 500));
                 processingDelayTimer = setTimeout(() => {
-                    processingStartedNoticeSent = true;
-                    sendProcessingStatus((config.processingStatusText || "⏳任务还在后台处理中，我还活着，别急哈～").trim());
-                    processingPulseTimer = setInterval(() => {
-                        const elapsedSec = Math.max(1, Math.floor((Date.now() - processingStartAt) / 1000));
-                        const raw = (config.processingPulseText || "⏳还在处理（已运行 {elapsed}s）...").trim();
-                        sendProcessingStatus(raw.replaceAll("{elapsed}", String(elapsedSec)));
-                    }, pulseMs);
+                    if (isGroup) {
+                        typingCardActivated = true;
+                        void setGroupTypingCard(client, account.accountId, groupId, (config.processingStatusText || "输入中").trim() || "输入中");
+                    }
                 }, delayMs);
             }
 
@@ -1085,9 +1110,8 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             finally {
                 clearProcessingTimers();
                 activeTaskIds.delete(taskKey);
-                if (processingStartedNoticeSent) {
-                    const elapsedSec = Math.max(1, Math.floor((Date.now() - processingStartAt) / 1000));
-                    sendProcessingStatus(`✅处理完成（耗时 ${elapsedSec}s）`);
+                if (typingCardActivated && isGroup) {
+                    clearGroupTypingCard(client, account.accountId, groupId);
                 }
             }
           } catch (err) {

@@ -231,6 +231,10 @@ export class OneBotClient extends EventEmitter {
     this.send("set_group_kick", { group_id: groupId, user_id: userId, reject_add_request: rejectAddRequest });
   }
 
+  setGroupCard(groupId: number, userId: number, card: string) {
+    this.send("set_group_card", { group_id: groupId, user_id: userId, card });
+  }
+
   private sendWithResponse(action: string, params: any, timeoutMs: number = 5000): Promise<any> {
     return new Promise((resolve, reject) => {
       if (this.ws?.readyState !== WebSocket.OPEN) {
