@@ -219,6 +219,42 @@ function isAudioFile(url: string): boolean {
     return lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.m4a') || lower.endsWith('.ogg') || lower.endsWith('.flac') || lower.endsWith('.aac');
 }
 
+async function findRecentAudioFallback(preferredExt?: string): Promise<string | null> {
+    const home = process.env.HOME;
+    if (!home) return null;
+    const fallbackDir = path.join(home, ".openclaw", "workspace", "voicevox_output");
+    try {
+        const entries = await fs.readdir(fallbackDir, { withFileTypes: true });
+        const candidates = entries
+            .filter((entry) => entry.isFile())
+            .map((entry) => path.join(fallbackDir, entry.name))
+            .filter((filePath) => isAudioFile(filePath));
+        if (candidates.length === 0) return null;
+
+        const preferred = preferredExt ? candidates.filter((filePath) => filePath.toLowerCase().endsWith(preferredExt.toLowerCase())) : [];
+        const pool = preferred.length > 0 ? preferred : candidates;
+
+        let bestPath: string | null = null;
+        let bestMtime = 0;
+        for (const filePath of pool) {
+            const stat = await fs.stat(filePath);
+            const mtime = stat.mtimeMs || 0;
+            if (mtime > bestMtime) {
+                bestMtime = mtime;
+                bestPath = filePath;
+            }
+        }
+        return bestPath;
+    } catch {
+        return null;
+    }
+}
+
+async function readLocalFileAsBase64(localPath: string): Promise<string> {
+    const data = await fs.readFile(localPath);
+    return `base64://${data.toString("base64")}`;
+}
+
 function splitMessage(text: string, limit: number): string[] {
     if (text.length <= limit) return [text];
     const chunks = [];
@@ -252,13 +288,19 @@ function processAntiRisk(text: string): string {
 async function resolveMediaUrl(url: string): Promise<string> {
     if (url.startsWith("file:")) {
         try {
-            const path = fileURLToPath(url);
-            const data = await fs.readFile(path);
-            const base64 = data.toString("base64");
-            return `base64://${base64}`;
+            const localPath = fileURLToPath(url);
+            return await readLocalFileAsBase64(localPath);
         } catch (e) {
+            const preferredExt = path.extname(url);
+            const fallback = await findRecentAudioFallback(preferredExt);
+            if (fallback) {
+                try {
+                    console.warn(`[QQ] Local media missing, fallback to recent audio: ${fallback}`);
+                    return await readLocalFileAsBase64(fallback);
+                } catch {}
+            }
             console.warn(`[QQ] Failed to convert local file to base64: ${e}`);
-            return url; // Fallback to original
+            return url;
         }
     }
 
@@ -270,10 +312,18 @@ async function resolveMediaUrl(url: string): Promise<string> {
     if (looksLocalPath) {
         try {
             const absolutePath = path.isAbsolute(url) ? url : path.resolve(process.cwd(), url);
-            const data = await fs.readFile(absolutePath);
-            const base64 = data.toString("base64");
-            return `base64://${base64}`;
+            return await readLocalFileAsBase64(absolutePath);
         } catch (e) {
+            if (isAudioFile(url)) {
+                const preferredExt = path.extname(url);
+                const fallback = await findRecentAudioFallback(preferredExt);
+                if (fallback) {
+                    try {
+                        console.warn(`[QQ] Local audio path unavailable, fallback to ${fallback}`);
+                        return await readLocalFileAsBase64(fallback);
+                    } catch {}
+                }
+            }
             console.warn(`[QQ] Failed to read local media path for base64 conversion: ${url} (${e})`);
             return url;
         }
