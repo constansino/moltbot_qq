@@ -15,6 +15,12 @@ import { OneBotClient } from "./client.js";
 import { QQConfigSchema, type QQConfig } from "./config.js";
 import { getQQRuntime } from "./runtime.js";
 import type { OneBotMessage, OneBotMessageSegment } from "./types.js";
+import { cleanCQCodes, extractImageUrls, getReplyMessageId } from "./cq/parser.js";
+import {
+  downloadImageUrlAsBase64,
+  materializeImageForVision,
+  MAX_VISION_IMAGE_COUNT,
+} from "./media/vision.js";
 
 export type ResolvedQQAccount = ChannelAccountSnapshot & {
   config: QQConfig;
@@ -36,86 +42,6 @@ function setCachedMemberName(groupId: string, userId: string, name: string) {
     memberCache.set(`${groupId}:${userId}`, { name, time: Date.now() });
 }
 
-function extractImageUrls(message: OneBotMessage | string | undefined, maxImages = 3): string[] {
-  const urls: string[] = [];
-  
-  if (Array.isArray(message)) {
-    for (const segment of message) {
-      if (segment.type === "image") {
-        const url = segment.data?.url || (typeof segment.data?.file === 'string' && (segment.data.file.startsWith('http') || segment.data.file.startsWith('base64://')) ? segment.data.file : undefined);
-        if (url) {
-          urls.push(url);
-          if (urls.length >= maxImages) break;
-        }
-      }
-    }
-  } else if (typeof message === "string") {
-    const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
-    let match;
-    while ((match = imageRegex.exec(message)) !== null) {
-      const val = match[1].replace(/&amp;/g, "&");
-      if (val.startsWith("http") || val.startsWith("base64://")) {
-        urls.push(val);
-        if (urls.length >= maxImages) break;
-      }
-    }
-  }
-  
-  return urls;
-}
-
-function cleanCQCodes(text: string | undefined): string {
-  if (!text) return "";
-  
-  let result = text;
-  const imageUrls: string[] = [];
-  
-  // Match both url= and file= if they look like URLs
-  const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
-  let match;
-  while ((match = imageRegex.exec(text)) !== null) {
-    const val = match[1].replace(/&amp;/g, "&");
-    if (val.startsWith("http")) {
-      imageUrls.push(val);
-    }
-  }
-
-  result = result.replace(/\[CQ:face,id=(\d+)\]/g, "[表情]");
-  
-  result = result.replace(/\[CQ:[^\]]+\]/g, (match) => {
-    if (match.startsWith("[CQ:image")) {
-      return "[图片]";
-    }
-    return "";
-  });
-  
-  result = result.replace(/\s+/g, " ").trim();
-  
-  if (imageUrls.length > 0) {
-    result = result ? `${result} [图片: ${imageUrls.join(", ")}]` : `[图片: ${imageUrls.join(", ")}]`;
-  }
-  
-  return result;
-}
-
-function getReplyMessageId(message: OneBotMessage | string | undefined, rawMessage?: string): string | null {
-  if (message && typeof message !== "string") {
-    for (const segment of message) {
-      if (segment.type === "reply" && segment.data?.id) {
-        const id = String(segment.data.id).trim();
-        if (id && /^-?\d+$/.test(id)) {
-          return id;
-        }
-      }
-    }
-  }
-  if (rawMessage) {
-    const match = rawMessage.match(/\[CQ:reply,id=(\d+)\]/);
-    if (match) return match[1];
-  }
-  return null;
-}
-
 function normalizeTarget(raw: string): string {
   return raw.replace(/^(qq:)/i, "");
 }
@@ -126,147 +52,6 @@ const blockedNotifyCache = new Map<string, number>();
 const activeTaskIds = new Set<string>();
 const groupBusyCounters = new Map<string, number>();
 const groupBaseCards = new Map<string, string>();
-
-const MAX_VISION_IMAGE_BYTES = 10 * 1024 * 1024;
-const MAX_VISION_IMAGE_COUNT = 3;
-const VISION_IMAGE_TIMEOUT_MS = 15_000;
-const QQ_TMP_PREFIX = "qq_vision_";
-
-function extFromContentType(contentType: string | null): string | null {
-  if (!contentType) return null;
-  const mime = contentType.split(";")[0]?.trim().toLowerCase();
-  if (mime === "image/jpeg") return ".jpg";
-  if (mime === "image/png") return ".png";
-  if (mime === "image/gif") return ".gif";
-  if (mime === "image/webp") return ".webp";
-  if (mime === "image/bmp") return ".bmp";
-  return null;
-}
-
-function extFromUrl(rawUrl: string): string | null {
-  try {
-    const parsed = new URL(rawUrl);
-    const ext = path.extname(parsed.pathname).toLowerCase();
-    if ([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"].includes(ext)) {
-      return ext === ".jpeg" ? ".jpg" : ext;
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function parseContentLength(headers: Headers): number | null {
-  const value = headers.get("content-length");
-  if (!value) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
-
-async function readResponseBodyWithLimit(res: Response, maxBytes: number, controller?: AbortController): Promise<Buffer | null> {
-  if (!res.body) return Buffer.alloc(0);
-
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-
-      received += value.byteLength;
-      if (received > maxBytes) {
-        controller?.abort();
-        return null;
-      }
-      chunks.push(value);
-    }
-
-    return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), received);
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-async function writeTempImageFile(buffer: Buffer, messageId: string | number, index: number, extHint: string): Promise<string> {
-  const safeExt = extHint.startsWith(".") ? extHint : ".jpg";
-  const name = `${QQ_TMP_PREFIX}${messageId}_${Date.now()}_${index}${safeExt}`;
-  const outPath = path.join("/tmp", name);
-  await fs.writeFile(outPath, buffer);
-  return outPath;
-}
-
-async function materializeImageForVision(rawUrl: string, messageId: string | number, index: number): Promise<string | null> {
-  if (!rawUrl) return null;
-
-  try {
-    if (rawUrl.startsWith("base64://")) {
-      const encoded = rawUrl.slice("base64://".length);
-      if (!encoded) return null;
-      const buffer = Buffer.from(encoded, "base64");
-      if (!buffer.length || buffer.length > MAX_VISION_IMAGE_BYTES) return null;
-      return await writeTempImageFile(buffer, messageId, index, ".jpg");
-    }
-
-    if (rawUrl.startsWith("file://")) {
-      const localPath = decodeURIComponent(rawUrl.slice("file://".length));
-      if (!localPath) return null;
-      const stat = await fs.stat(localPath).catch(() => null);
-      if (!stat || !stat.isFile() || stat.size > MAX_VISION_IMAGE_BYTES) return null;
-      return localPath;
-    }
-
-    if (rawUrl.startsWith("/")) {
-      const stat = await fs.stat(rawUrl).catch(() => null);
-      if (!stat || !stat.isFile() || stat.size > MAX_VISION_IMAGE_BYTES) return null;
-      return rawUrl;
-    }
-
-    if (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://")) return null;
-
-    const headController = new AbortController();
-    const headTimeout = setTimeout(() => headController.abort(), VISION_IMAGE_TIMEOUT_MS);
-    try {
-      const headRes = await fetch(rawUrl, { method: "HEAD", signal: headController.signal });
-      if (headRes.ok) {
-        const len = parseContentLength(headRes.headers);
-        if (len !== null && len > MAX_VISION_IMAGE_BYTES) return null;
-      }
-    } catch {
-      // Some hosts block HEAD requests; enforce size again during GET.
-    } finally {
-      clearTimeout(headTimeout);
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), VISION_IMAGE_TIMEOUT_MS);
-    try {
-      const res = await fetch(rawUrl, {
-        signal: controller.signal,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (OpenClaw QQ)",
-        },
-      });
-      if (!res.ok) return null;
-
-      const len = parseContentLength(res.headers);
-      if (len !== null && len > MAX_VISION_IMAGE_BYTES) return null;
-
-      const body = await readResponseBodyWithLimit(res, MAX_VISION_IMAGE_BYTES, controller);
-      if (!body || !body.length) return null;
-
-      const ext = extFromContentType(res.headers.get("content-type")) || extFromUrl(rawUrl) || ".jpg";
-      return await writeTempImageFile(body, messageId, index, ext);
-    } finally {
-      clearTimeout(timeout);
-    }
-  } catch (error) {
-    console.warn(`[QQ] Failed to prepare image for vision: ${String(error)}`);
-    return null;
-  }
-}
 
 function normalizeNumericId(value: string | number | undefined | null): number | null {
     if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
@@ -463,35 +248,6 @@ async function ensureFileInSharedMedia(localPath: string, hostSharedDir: string)
     const destPath = path.join(hostSharedDir, baseName);
     await fs.copyFile(localPath, destPath);
     return baseName;
-}
-
-async function downloadImageUrlAsBase64(rawUrl: string): Promise<string | null> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), VISION_IMAGE_TIMEOUT_MS);
-
-    try {
-        const res = await fetch(rawUrl, {
-            signal: controller.signal,
-            headers: {
-                "User-Agent": "Mozilla/5.0 (OpenClaw QQ)",
-            },
-        });
-
-        if (!res.ok) return null;
-
-        const len = parseContentLength(res.headers);
-        if (len !== null && len > MAX_VISION_IMAGE_BYTES) return null;
-
-        const body = await readResponseBodyWithLimit(res, MAX_VISION_IMAGE_BYTES, controller);
-        if (!body || !body.length) return null;
-
-        return `base64://${body.toString("base64")}`;
-    } catch (error) {
-        console.warn(`[QQ] Failed to download external image as base64: ${String(error)}`);
-        return null;
-    } finally {
-        clearTimeout(timeout);
-    }
 }
 
 function toLocalPathIfAny(value: string): string | null {
