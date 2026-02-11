@@ -133,7 +133,7 @@ You can also edit config directly. Full config example:
 | `notifyNonAdminBlocked` | boolean | `false` | When `adminOnlyChat=true` and a non-admin triggers, whether to send a rejection notice. |
 | `nonAdminBlockedMessage` | string | `Only admins can trigger this bot currently.\nPlease contact an administrator if you need access.` | Rejection message shown to blocked non-admin users. |
 | `blockedNotifyCooldownMs` | number | `10000` | Cooldown (ms) for non-admin rejection notices. Prevents repeated notices within the same session/user target. |
-| `showProcessingStatus` | boolean | `true` | Busy-status visualization (enabled by default). While processing, the bot temporarily appends ` (typing)` to its group card. |
+| `showProcessingStatus` | boolean | `true` | Busy-status visualization (enabled by default). While processing, the bot temporarily appends ` (输入中)` to its group card. |
 | `processingStatusDelayMs` | number | `500` | Delay in milliseconds before applying the busy suffix. |
 | `processingStatusText` | string | `输入中` | Busy suffix text. Default is `输入中`. |
 | `requireMention` | boolean | `true` | **Group trigger gate**. `true` = trigger only on @mention / reply-to-bot / keyword hit; `false` = normal group messages may also trigger (not recommended for long-term use). |
