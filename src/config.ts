@@ -8,7 +8,10 @@ const QQIdSchema = z.union([
 export const QQConfigSchema = z.object({
   wsUrl: z.string().url().describe("The WebSocket URL of the OneBot v11 server (e.g. ws://localhost:3001)"),
   accessToken: z.string().optional().describe("The access token for the OneBot server"),
-  admins: z.array(QQIdSchema).optional().describe("List of admin QQ numbers"),
+  admins: z.union([
+    z.string(),
+    z.array(QQIdSchema),
+  ]).optional().describe("Admin QQ numbers (comma/newline separated or array)"),
   requireMention: z.boolean().optional().default(true).describe("Require @mention or reply to bot in group chats"),
   systemPrompt: z.string().optional().describe("Custom system prompt to inject into the context"),
   enableDeduplication: z.boolean().optional().default(true).describe("Enable message deduplication to prevent double replies"),
