@@ -192,7 +192,7 @@ openclaw setup qq
 仅配置在 `admins` 列表中的用户可用：
 
 *   群聊模型命令支持（仅管理员）：
-    *   `@机器人 /models` 会自动按 `/model list` 处理。
+    *   `@机器人 /models` 可直接触发模型列表（仅管理员）。
     *   `@机器人 /model`、`@机器人 /model 28` 也仅管理员可触发。
 
 *   `/status`

@@ -190,7 +190,7 @@ Pay close attention to the combination of `requireMention` and `keywordTriggers`
 Only users listed in `admins` can use:
 
 * Group model command support (admin-only):
-  * `@bot /models` is auto-mapped to `/model list`.
+  * `@bot /models` directly triggers model listing (admin-only).
   * `@bot /model` and `@bot /model 28` are also admin-only in groups.
 
 * `/status`

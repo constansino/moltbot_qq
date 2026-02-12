@@ -862,7 +862,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             let forceTriggered = false;
             if (isGroup && /^\/models\b/i.test(commandTextCandidate)) {
                 if (!isAdmin) return;
-                text = commandTextCandidate.replace(/^\/models\b/i, "/model list").trim();
+                text = commandTextCandidate;
                 forceTriggered = true;
             } else if (isGroup && /^\/model\b/i.test(commandTextCandidate)) {
                 if (!isAdmin) return;
