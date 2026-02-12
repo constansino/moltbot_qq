@@ -172,7 +172,22 @@ export async function resolveMediaUrl(url: string): Promise<string> {
   const isRemoteHttp = url.startsWith("http://") || url.startsWith("https://");
   const isRemoteImage = isImageFile(url);
   if (isRemoteHttp && isRemoteImage) {
-    const isQQHost = url.includes("qq.com") || url.includes("multimedia.nt.qq.com.cn");
+    // Fix: Use proper hostname parsing instead of substring match
+    let isQQHost = false;
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      isQQHost =
+        hostname === "qq.com" ||
+        hostname.endsWith(".qq.com") ||
+        hostname === "multimedia.nt.qq.com.cn" ||
+        hostname.endsWith(".multimedia.nt.qq.com.cn") ||
+        hostname === "gchat.qpic.cn" ||
+        hostname === "c2cpicdw.qpic.cn" ||
+        hostname === "puui.qpic.cn";
+    } catch {
+      // Fallback to substring behavior if URL parsing fails
+      isQQHost = url.includes("qq.com") || url.includes("multimedia.nt.qq.com.cn");
+    }
     if (!isQQHost) {
       const converted = await downloadImageUrlAsBase64(url);
       if (converted) return converted;

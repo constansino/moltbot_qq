@@ -7,6 +7,114 @@ export const VISION_IMAGE_TIMEOUT_MS = 15_000;
 
 const QQ_TMP_PREFIX = "qq_vision_";
 
+// 允许的本地文件目录（安全白名单）
+const ALLOWED_LOCAL_PATH_PREFIXES = [
+  "/tmp",
+  "/var/tmp",
+  "/temp",
+  process.env.TMPDIR,
+  process.env.TEMP,
+  process.env.HOME ? path.join(process.env.HOME, ".openclaw") : undefined,
+].filter((p): p is string => typeof p === "string" && p.length > 0);
+
+// 添加 OneBot/NapCat 可能的缓存目录
+function getOneBotCacheDirs(): string[] {
+  const dirs: string[] = [];
+  // NapCat 常见缓存路径
+  if (process.env.HOME) {
+    dirs.push(path.join(process.env.HOME, ".config", "NapCat", "cache"));
+    dirs.push(path.join(process.env.HOME, ".napcat"));
+    dirs.push(path.join(process.env.HOME, "napcat"));
+  }
+  // 可能的系统临时目录
+  if (process.env.TMPDIR) dirs.push(process.env.TMPDIR);
+  if (process.env.TEMP) dirs.push(process.env.TEMP);
+  return dirs;
+}
+
+const SAFE_PATH_PREFIXES = [...ALLOWED_LOCAL_PATH_PREFIXES, ...getOneBotCacheDirs()];
+
+// 检查路径是否在允许的安全目录内
+function isPathInSafeLocation(filePath: string): boolean {
+  const resolvedPath = path.resolve(filePath);
+  return SAFE_PATH_PREFIXES.some((prefix) => {
+    const resolvedPrefix = path.resolve(prefix);
+    return resolvedPath.startsWith(resolvedPrefix);
+  });
+}
+
+// SSRF 防护：检查 URL 是否指向私有/内部网络
+function isPrivateUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+
+    // 检查 localhost 及其变体
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "0.0.0.0") {
+      return true;
+    }
+
+    // 检查 IPv4 私有地址段
+    const ipv4PrivateRanges = [
+      /^10\./, // 10.0.0.0/8
+      /^172\.(1[6-9]|2[0-9]|3[01])\./, // 172.16.0.0/12
+      /^192\.168\./, // 192.168.0.0/16
+      /^127\./, // 127.0.0.0/8
+      /^169\.254\./, // 链路本地地址
+      /^0\./, // 当前网络
+      /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./, // 运营商级 NAT (100.64.0.0/10)
+    ];
+
+    if (ipv4PrivateRanges.some((range) => range.test(hostname))) {
+      return true;
+    }
+
+    // 检查 IPv6 私有地址段
+    const ipv6PrivateRanges = [
+      /^::$/,
+      /^::1$/,
+      /^fc00:/i, // 唯一本地地址
+      /^fe80:/i, // 链路本地地址
+      /^ff00:/i, // 多播地址
+    ];
+
+    if (ipv6PrivateRanges.some((range) => range.test(hostname))) {
+      return true;
+    }
+
+    // 检查是否为纯 IP 地址（可能是内网）
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return true; // 解析失败，保守起见认为是私有的
+  }
+}
+
+// 允许的 QQ 图片域名白名单
+const ALLOWED_IMAGE_HOSTS = [
+  "qq.com",
+  "multimedia.nt.qq.com.cn",
+  "gchat.qpic.cn",
+  "c2cpicdw.qpic.cn",
+  "puui.qpic.cn",
+  "inews.gtimg.com",
+];
+
+function isAllowedImageHost(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    return ALLOWED_IMAGE_HOSTS.some(
+      (allowed) => hostname === allowed || hostname.endsWith(`.${allowed}`)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function extFromContentType(contentType: string | null): string | null {
   if (!contentType) return null;
   const mime = contentType.split(";")[0]?.trim().toLowerCase();
@@ -88,18 +196,37 @@ export async function materializeImageForVision(rawUrl: string, messageId: strin
     if (rawUrl.startsWith("file://")) {
       const localPath = decodeURIComponent(rawUrl.slice("file://".length));
       if (!localPath) return null;
+      
+      // 安全检查：只允许安全目录内的文件
+      if (!isPathInSafeLocation(localPath)) {
+        console.warn(`[QQ] Rejected file:// URL outside safe directories: ${localPath}`);
+        return null;
+      }
+      
       const stat = await fs.stat(localPath).catch(() => null);
       if (!stat || !stat.isFile() || stat.size > MAX_VISION_IMAGE_BYTES) return null;
       return localPath;
     }
 
     if (rawUrl.startsWith("/")) {
+      // 安全检查：只允许安全目录内的文件
+      if (!isPathInSafeLocation(rawUrl)) {
+        console.warn(`[QQ] Rejected local path outside safe directories: ${rawUrl}`);
+        return null;
+      }
+      
       const stat = await fs.stat(rawUrl).catch(() => null);
       if (!stat || !stat.isFile() || stat.size > MAX_VISION_IMAGE_BYTES) return null;
       return rawUrl;
     }
 
     if (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://")) return null;
+
+    // SSRF 防护：阻止私有网络请求
+    if (isPrivateUrl(rawUrl)) {
+      console.warn(`[QQ] Rejected request to private/internal URL: ${rawUrl}`);
+      return null;
+    }
 
     const headController = new AbortController();
     const headTimeout = setTimeout(() => headController.abort(), VISION_IMAGE_TIMEOUT_MS);
@@ -144,6 +271,12 @@ export async function materializeImageForVision(rawUrl: string, messageId: strin
 }
 
 export async function downloadImageUrlAsBase64(rawUrl: string): Promise<string | null> {
+  // SSRF 防护：阻止私有网络请求
+  if (isPrivateUrl(rawUrl)) {
+    console.warn(`[QQ] Rejected download from private/internal URL: ${rawUrl}`);
+    return null;
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), VISION_IMAGE_TIMEOUT_MS);
 

@@ -346,7 +346,13 @@ export async function handleQQInboundMessage(ctx: any): Promise<void> {
             });
 
             const deliver = async (payload: any) => {
-                 const sendDelayMs = Math.max(0, Number(config.blankLineSplitDelayMs ?? config.rateLimitMs ?? 1000));
+                 // Fix: Only use blankLineSplitDelayMs when splitOnBlankLine is enabled and actually used
+                 const splitOnBlankLine = Boolean(config.splitOnBlankLine ?? true);
+                 const hasBlankLines = payload.text?.includes('\n\n');
+                 const useBlankLineDelay = splitOnBlankLine && hasBlankLines;
+                 const sendDelayMs = useBlankLineDelay
+                   ? Math.max(0, Number(config.blankLineSplitDelayMs ?? 1000))
+                   : Math.max(0, Number(config.rateLimitMs ?? 1000));
 
                  const send = async (msg: string) => {
                      let processed = msg;

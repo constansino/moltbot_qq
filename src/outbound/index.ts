@@ -84,9 +84,13 @@ export function createQQOutbound(opts: {
 
       const stageAudioRecordIfNeeded = async (): Promise<string> => {
         let recordFile = stagedAudioFile || finalUrl;
+        // Fix: Only stage if it's a local path, not http(s) URL
+        const localPath = toLocalPathIfAny(recordFile);
+        if (!localPath) {
+          return recordFile;
+        }
         if (!recordFile.startsWith("base64://") && hostSharedDir) {
           try {
-            const localPath = recordFile.startsWith("file:") ? fileURLToPath(recordFile) : recordFile;
             const copiedName = await ensureFileInSharedMedia(localPath, hostSharedDir);
             recordFile = path.posix.join(containerSharedDir.replace(/\\/g, "/"), copiedName);
           } catch (err) {
@@ -172,12 +176,15 @@ export function createQQOutbound(opts: {
             };
           }
           if (!finalUrl.startsWith("base64://") && hostSharedDir) {
-            try {
-              const localPath = finalUrl.startsWith("file:") ? fileURLToPath(finalUrl) : finalUrl;
-              const copiedName = await ensureFileInSharedMedia(localPath, hostSharedDir);
-              fallbackFile = path.posix.join(containerSharedDir.replace(/\\/g, "/"), copiedName);
-            } catch (err) {
-              console.warn("[QQ] Failed to stage fallback audio file into shared media dir:", err);
+            // Fix: Only stage if it's a local path, not http(s) URL
+            const localPath = toLocalPathIfAny(finalUrl);
+            if (localPath) {
+              try {
+                const copiedName = await ensureFileInSharedMedia(localPath, hostSharedDir);
+                fallbackFile = path.posix.join(containerSharedDir.replace(/\\/g, "/"), copiedName);
+              } catch (err) {
+                console.warn("[QQ] Failed to stage fallback audio file into shared media dir:", err);
+              }
             }
           }
           fileFallback.push({ type: "file", data: { file: fallbackFile } });
