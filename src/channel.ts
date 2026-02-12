@@ -98,6 +98,66 @@ function cleanCQCodes(text: string | undefined): string {
   return result;
 }
 
+function splitLongText(input: string, maxLength = 2800): string[] {
+  const text = (input || "").trim();
+  if (!text) return [];
+  if (text.length <= maxLength) return [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > maxLength) {
+    let cut = rest.lastIndexOf("\n", maxLength);
+    if (cut < Math.floor(maxLength * 0.5)) cut = maxLength;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+async function buildModelCatalogText(): Promise<string> {
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const candidates = [
+    process.env.OPENCLAW_CONFIG,
+    process.env.OPENCLAW_CONFIG_PATH,
+    home ? path.join(home, ".openclaw", "openclaw.json") : "",
+  ].filter((value): value is string => Boolean(value && value.trim()));
+
+  let parsed: any = null;
+  let usedPath = "";
+  for (const cfgPath of candidates) {
+    try {
+      const raw = await fs.readFile(cfgPath, "utf-8");
+      parsed = JSON.parse(raw);
+      usedPath = cfgPath;
+      break;
+    } catch {}
+  }
+
+  if (!parsed) {
+    return "[OpenClawd QQ]\n无法读取模型配置文件。请在服务器执行：openclaw status";
+  }
+
+  const providers = parsed?.models?.providers as Record<string, any> | undefined;
+  const currentModel = typeof parsed?.agent?.model === "string" ? parsed.agent.model : "unknown";
+  if (!providers || typeof providers !== "object") {
+    return `[OpenClawd QQ]\nCurrent: ${currentModel}\n未找到 models.providers 配置。`;
+  }
+
+  const lines: string[] = [`[OpenClawd QQ]`, `Current: ${currentModel}`, `Providers:`];
+  let index = 1;
+  for (const [providerName, providerValue] of Object.entries(providers)) {
+    const models = Array.isArray((providerValue as any)?.models) ? (providerValue as any).models : [];
+    lines.push(`- ${providerName} (${models.length})`);
+    for (const model of models) {
+      const modelId = typeof model?.id === "string" && model.id.trim() ? model.id.trim() : "(no-id)";
+      lines.push(`  ${index}. ${providerName}/${modelId}`);
+      index += 1;
+    }
+  }
+  lines.push(`Config: ${usedPath}`);
+  return lines.join("\n");
+}
+
 function getReplyMessageId(message: OneBotMessage | string | undefined, rawMessage?: string): string | null {
   if (message && typeof message !== "string") {
     for (const segment of message) {
@@ -873,6 +933,16 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             if (!isGuild && isAdmin && text.trim().startsWith('/')) {
                 const parts = text.trim().split(/\s+/);
                 const cmd = parts[0];
+                if (cmd === '/models' || (cmd === '/model' && (!parts[1] || /^list$/i.test(parts[1])))) {
+                    const catalog = await buildModelCatalogText();
+                    const chunks = splitLongText(catalog, 2800);
+                    for (const chunk of chunks) {
+                        if (isGroup) client.sendGroupMsg(groupId, chunk);
+                        else client.sendPrivateMsg(userId, chunk);
+                        if (config.rateLimitMs > 0) await sleep(Math.min(config.rateLimitMs, 800));
+                    }
+                    return;
+                }
                 if (cmd === '/status') {
                     const activeCount = countActiveTasksForAccount(account.accountId);
                     const statusMsg = `[OpenClawd QQ]\nState: Connected\nSelf ID: ${client.getSelfId()}\nMemory: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB\nActiveTasks: ${activeCount}`;
