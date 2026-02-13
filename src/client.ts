@@ -16,6 +16,8 @@ export class OneBotClient extends EventEmitter {
   private isAlive = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private pendingMessages: Array<{ action: string; params: any }> = [];
+  private lastMessageAt = 0;
 
   constructor(options: OneBotClientOptions) {
     super();
@@ -44,8 +46,17 @@ export class OneBotClient extends EventEmitter {
       this.ws.on("open", () => {
         this.isAlive = true;
         this.reconnectAttempts = 0; // Reset counter on success
+        this.lastMessageAt = Date.now();
         this.emit("connect");
         console.log("[QQ] Connected to OneBot server");
+
+        if (this.pendingMessages.length > 0) {
+          const toFlush = this.pendingMessages.splice(0, this.pendingMessages.length);
+          for (const item of toFlush) {
+            this.ws?.send(JSON.stringify({ action: item.action, params: item.params }));
+          }
+          console.log(`[QQ] Flushed ${toFlush.length} queued outbound message(s)`);
+        }
         
         // Start heartbeat check
         this.startHeartbeat();
@@ -53,6 +64,7 @@ export class OneBotClient extends EventEmitter {
 
       this.ws.on("message", (data) => {
         this.isAlive = true; // Any message from server means connection is alive
+        this.lastMessageAt = Date.now();
         try {
           const payload = JSON.parse(data.toString()) as OneBotEvent;
           if (payload.post_type === "meta_event" && payload.meta_event_type === "heartbeat") {
@@ -98,16 +110,15 @@ export class OneBotClient extends EventEmitter {
 
   private startHeartbeat() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    // Check every 30 seconds
+    // Check every 30 seconds; tolerate idle links and only reconnect when stale for too long.
     this.heartbeatTimer = setInterval(() => {
-      if (this.isAlive === false) {
-        console.warn("[QQ] Heartbeat timeout, forcing reconnect...");
+      const staleMs = Date.now() - this.lastMessageAt;
+      if (staleMs > 180000) {
+        console.warn(`[QQ] No inbound traffic for ${Math.round(staleMs / 1000)}s, forcing reconnect...`);
         this.handleDisconnect();
         return;
       }
-      this.isAlive = false;
-      // We don't send ping, we rely on OneBot's heartbeat meta_event
-      // or we can send a small API call to verify
+      this.isAlive = true;
     }, 45000); 
   }
 
@@ -133,8 +144,16 @@ export class OneBotClient extends EventEmitter {
     this.send("send_private_msg", { user_id: userId, message });
   }
 
+  async sendPrivateMsgAck(userId: number, message: OneBotMessage | string): Promise<any> {
+    return this.sendWithResponse("send_private_msg", { user_id: userId, message }, 15000);
+  }
+
   sendGroupMsg(groupId: number, message: OneBotMessage | string) {
     this.send("send_group_msg", { group_id: groupId, message });
+  }
+
+  async sendGroupMsgAck(groupId: number, message: OneBotMessage | string): Promise<any> {
+    return this.sendWithResponse("send_group_msg", { group_id: groupId, message }, 15000);
   }
 
   deleteMsg(messageId: number | string) {
@@ -179,6 +198,10 @@ export class OneBotClient extends EventEmitter {
     this.send("send_guild_channel_msg", { guild_id: guildId, channel_id: channelId, message });
   }
 
+  async sendGuildChannelMsgAck(guildId: string, channelId: string, message: OneBotMessage | string): Promise<any> {
+    return this.sendWithResponse("send_guild_channel_msg", { guild_id: guildId, channel_id: channelId, message }, 15000);
+  }
+
   async getGuildList(): Promise<any[]> {
     // Note: API name varies by implementation (get_guild_list vs get_guilds)
     // We try the most common one for extended OneBot
@@ -208,7 +231,11 @@ export class OneBotClient extends EventEmitter {
     this.send("set_group_kick", { group_id: groupId, user_id: userId, reject_add_request: rejectAddRequest });
   }
 
-  private sendWithResponse(action: string, params: any): Promise<any> {
+  setGroupCard(groupId: number, userId: number, card: string) {
+    this.send("set_group_card", { group_id: groupId, user_id: userId, card });
+  }
+
+  private sendWithResponse(action: string, params: any, timeoutMs: number = 5000): Promise<any> {
     return new Promise((resolve, reject) => {
       if (this.ws?.readyState !== WebSocket.OPEN) {
         reject(new Error("WebSocket not open"));
@@ -235,11 +262,11 @@ export class OneBotClient extends EventEmitter {
       this.ws.on("message", handler);
       this.ws.send(JSON.stringify({ action, params, echo }));
 
-      // Timeout after 5 seconds
+      // Timeout guard
       setTimeout(() => {
         this.ws?.off("message", handler);
         reject(new Error("Request timeout"));
-      }, 5000);
+      }, timeoutMs);
     });
   }
 
@@ -247,7 +274,13 @@ export class OneBotClient extends EventEmitter {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ action, params }));
     } else {
-      console.warn("[QQ] Cannot send message, WebSocket not open");
+      if (this.pendingMessages.length < 200) {
+        this.pendingMessages.push({ action, params });
+      }
+      console.warn(`[QQ] WebSocket not open; queued outbound action=${action} queue=${this.pendingMessages.length}`);
+      if (!this.reconnectTimer) {
+        this.scheduleReconnect();
+      }
     }
   }
 
