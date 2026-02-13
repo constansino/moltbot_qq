@@ -149,7 +149,6 @@ async function grokDrawDirect(prompt: string): Promise<{ ok: true; url: string }
     return { ok: false, error: `调用 Grok 失败: ${String(err)}` };
   }
 }
-
 async function buildModelCatalogText(): Promise<string> {
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const candidates = [
@@ -1369,7 +1368,6 @@ ${current}
                     else client.sendPrivateMsg(userId, notice);
                     return;
                 }
-
                 if (cmd === '/grok_draw') {
                     const prompt = text.trim().slice('/grok_draw'.length).trim();
                     console.log(`[QQ] direct command hit: /grok_draw prompt_len=${prompt.length} group=${groupId || "-"} user=${userId}`);
