@@ -1203,13 +1203,12 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 text = "/newsession";
                 forceTriggered = true;
             }
-            else if (isGroup && /^\/(临时|tmp|退出临时|exittemp|临时状态|tmpstatus|临时列表|tmplist|临时结束|tmpend)\b/i.test(inlineCommand)) {
+            else if (isGroup && /^\/(临时|tmp|退出临时|exittemp|临时状态|tmpstatus|临时列表|tmplist|临时结束|tmpend|临时重命名|tmprename)\b/i.test(inlineCommand)) {
                 if (!isAdmin) return;
                 text = inlineCommand;
                 forceTriggered = true;
             }
             else if (isGroup && /^\/grok_draw\b/i.test(inlineCommand)) {
-                if (!isAdmin) return;
                 text = inlineCommand;
                 forceTriggered = true;
             }
@@ -1233,6 +1232,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 ${current}
 用法:
 /临时 <名称> 进入临时会话
+/临时重命名 <新名称> 重命名当前临时会话
 /退出临时 回到主会话
 /临时状态 查看当前会话
 /临时列表 查看已有临时会话
@@ -1244,7 +1244,27 @@ ${current}
                     activeTempSlot = requested;
                     const msg = `[OpenClawd QQ]
 ✅ 已进入临时会话: ${requested}
-后续消息将写入临时会话，不占用主会话。\n可用命令：/临时状态 /临时列表 /退出临时 /临时结束`;
+后续消息将写入临时会话，不占用主会话。\n可用命令：/临时状态 /临时列表 /临时重命名 /退出临时 /临时结束`;
+                    if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                    return;
+                }
+
+                if (cmd === '/临时重命名' || cmd === '/tmprename') {
+                    if (!activeTempSlot) {
+                        const msg = `[OpenClawd QQ]\n当前未在临时会话中，无法重命名。\n先用 /临时 <名称> 进入临时会话。`;
+                        if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                        return;
+                    }
+                    const renamed = sanitizeTempSlotName(parts.slice(1).join(' '));
+                    if (!renamed) {
+                        const msg = `[OpenClawd QQ]\n用法：/临时重命名 <新名称>`;
+                        if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                        return;
+                    }
+                    const oldName = activeTempSlot;
+                    await setTempSessionSlot(threadSessionKey, renamed);
+                    activeTempSlot = renamed;
+                    const msg = `[OpenClawd QQ]\n✅ 临时会话已重命名：${oldName} -> ${renamed}`;
                     if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
                     return;
                 }
@@ -1352,6 +1372,7 @@ ${current}
 
                 if (cmd === '/grok_draw') {
                     const prompt = text.trim().slice('/grok_draw'.length).trim();
+                    console.log(`[QQ] direct command hit: /grok_draw prompt_len=${prompt.length} group=${groupId || "-"} user=${userId}`);
                     const draw = await grokDrawDirect(prompt);
                     if (!draw.ok) {
                         const fail = `[OpenClawd QQ]\n❌ ${draw.error}`;
@@ -1376,8 +1397,10 @@ ${current}
                     const helpMsg = `[OpenClawd QQ]
 /status - 状态
 /临时 <名称> - 进入临时会话
+/临时重命名 <新名称> - 重命名当前临时会话
 /退出临时 - 回到主会话
 /临时状态 - 查看当前会话
+/临时列表 - 查看最近临时会话
 /临时结束 - 结束当前临时会话
 /newsession - 重置当前会话
 /mute @用户 [分] - 禁言
