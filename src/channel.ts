@@ -114,6 +114,42 @@ function splitLongText(input: string, maxLength = 2800): string[] {
   return chunks;
 }
 
+async function grokDrawDirect(prompt: string): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  const p = (prompt || "").trim();
+  if (!p) return { ok: false, error: "缺少提示词。用法: /grok_draw <提示词>" };
+
+  const baseUrl = (process.env.GROK2API_BASE_URL || "http://127.0.0.1:18001/v1").replace(/\/+$/, "");
+  const apiKey = process.env.GROK2API_KEY || "grok2api";
+
+  try {
+    const resp = await fetch(`${baseUrl}/images/generations`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "grok-imagine-1.0",
+        prompt: p,
+        n: 1,
+        size: "1024x1024",
+      }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      return { ok: false, error: `Grok API 错误: HTTP ${resp.status}${text ? ` | ${text.slice(0, 300)}` : ""}` };
+    }
+
+    const data = await resp.json().catch(() => null) as any;
+    const url = typeof data?.data?.[0]?.url === "string" ? data.data[0].url.trim() : "";
+    if (!url) return { ok: false, error: "Grok 返回中没有图片 URL" };
+    return { ok: true, url };
+  } catch (err) {
+    return { ok: false, error: `调用 Grok 失败: ${String(err)}` };
+  }
+}
+
 async function buildModelCatalogText(): Promise<string> {
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const candidates = [
@@ -291,6 +327,134 @@ function countActiveTasksForAccount(accountId: string): number {
     return count;
 }
 
+
+const TEMP_SESSION_STATE_FILE = path.join(
+    process.env.HOME || process.env.USERPROFILE || ".",
+    ".openclaw",
+    "workspace",
+    "qq-temp-sessions.json",
+);
+
+type TempSessionState = {
+    active?: Record<string, string>;
+    history?: Record<string, string[]>;
+};
+
+const tempSessionSlots = new Map<string, string>();
+const tempSessionHistory = new Map<string, string[]>();
+let tempSessionSlotsLoaded = false;
+let tempSessionSlotsLoading: Promise<void> | null = null;
+
+function buildTempThreadKey(accountId: string, isGroup: boolean, isGuild: boolean, groupId?: number, guildId?: string, channelId?: string, userId?: number): string {
+    if (isGroup && groupId !== undefined) return `${accountId}:group:${groupId}`;
+    if (isGuild && guildId && channelId) return `${accountId}:guild:${guildId}:${channelId}`;
+    return `${accountId}:dm:${String(userId ?? "unknown")}`;
+}
+
+function sanitizeTempSlotName(input: string | undefined): string {
+    const raw = String(input || "").trim();
+    if (!raw) return "";
+    return raw
+        .replace(/\s+/g, "-")
+        .replace(/[^\p{L}\p{N}_-]+/gu, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 48);
+}
+
+function buildEffectiveFromId(baseFromId: string, tempSlot: string | null): string {
+    if (!tempSlot) return baseFromId;
+    return `${baseFromId}::tmp:${tempSlot}`;
+}
+
+function getTempSessionHistory(threadKey: string): string[] {
+    return tempSessionHistory.get(threadKey) || [];
+}
+
+function pushTempHistory(threadKey: string, slot: string): void {
+    const prev = tempSessionHistory.get(threadKey) || [];
+    const next = [slot, ...prev.filter((item) => item !== slot)].slice(0, 12);
+    tempSessionHistory.set(threadKey, next);
+}
+
+async function ensureTempSessionSlotsLoaded(): Promise<void> {
+    if (tempSessionSlotsLoaded) return;
+    if (tempSessionSlotsLoading) {
+        await tempSessionSlotsLoading;
+        return;
+    }
+    tempSessionSlotsLoading = (async () => {
+        try {
+            const raw = await fs.readFile(TEMP_SESSION_STATE_FILE, "utf-8");
+            const parsed = JSON.parse(raw) as TempSessionState | Record<string, string>;
+
+            if (parsed && typeof parsed === "object" && "active" in parsed) {
+                const state = parsed as TempSessionState;
+                if (state.active && typeof state.active === "object") {
+                    for (const [key, value] of Object.entries(state.active)) {
+                        const slot = sanitizeTempSlotName(value);
+                        if (slot) tempSessionSlots.set(key, slot);
+                    }
+                }
+                if (state.history && typeof state.history === "object") {
+                    for (const [key, values] of Object.entries(state.history)) {
+                        if (!Array.isArray(values)) continue;
+                        const cleaned = values
+                            .map((value) => sanitizeTempSlotName(String(value)))
+                            .filter(Boolean)
+                            .slice(0, 12);
+                        if (cleaned.length > 0) tempSessionHistory.set(key, cleaned);
+                    }
+                }
+            } else if (parsed && typeof parsed === "object") {
+                for (const [key, value] of Object.entries(parsed)) {
+                    const slot = sanitizeTempSlotName(String(value));
+                    if (slot) {
+                        tempSessionSlots.set(key, slot);
+                        pushTempHistory(key, slot);
+                    }
+                }
+            }
+        } catch {}
+        tempSessionSlotsLoaded = true;
+    })();
+    await tempSessionSlotsLoading;
+    tempSessionSlotsLoading = null;
+}
+
+async function persistTempSessionSlots(): Promise<void> {
+    try {
+        await fs.mkdir(path.dirname(TEMP_SESSION_STATE_FILE), { recursive: true });
+        const active: Record<string, string> = {};
+        for (const [key, value] of tempSessionSlots.entries()) {
+            active[key] = value;
+        }
+        const history: Record<string, string[]> = {};
+        for (const [key, values] of tempSessionHistory.entries()) {
+            if (values.length > 0) history[key] = values;
+        }
+        const state: TempSessionState = { active, history };
+        await fs.writeFile(TEMP_SESSION_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+    } catch (err) {
+        console.warn(`[QQ] Failed to persist temp session slots: ${String(err)}`);
+    }
+}
+
+function getTempSessionSlot(threadKey: string): string | null {
+    const slot = tempSessionSlots.get(threadKey);
+    return slot || null;
+}
+
+async function setTempSessionSlot(threadKey: string, slot: string | null): Promise<void> {
+    if (slot) {
+        tempSessionSlots.set(threadKey, slot);
+        pushTempHistory(threadKey, slot);
+    } else {
+        tempSessionSlots.delete(threadKey);
+    }
+    await persistTempSessionSlots();
+}
+
 async function setGroupTypingCard(client: OneBotClient, accountId: string, groupId: number, busySuffix: string): Promise<void> {
     const selfId = client.getSelfId();
     if (!selfId) return;
@@ -367,6 +531,76 @@ function isImageFile(url: string): boolean {
 function isAudioFile(url: string): boolean {
     const lower = url.toLowerCase();
     return lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.m4a') || lower.endsWith('.ogg') || lower.endsWith('.flac') || lower.endsWith('.aac');
+}
+
+function isVideoFile(url: string): boolean {
+    const lower = url.toLowerCase();
+    return lower.endsWith(".mp4") || lower.endsWith(".mov") || lower.endsWith(".mkv") || lower.endsWith(".avi") || lower.endsWith(".webm") || lower.endsWith(".m4v");
+}
+
+type MediaKind = "image" | "audio" | "video" | "file";
+
+function detectMediaKind(...values: Array<string | undefined | null>): MediaKind {
+    for (const value of values) {
+        if (!value) continue;
+        if (value.startsWith("base64://")) return "image";
+        if (isImageFile(value)) return "image";
+        if (isAudioFile(value)) return "audio";
+        if (isVideoFile(value)) return "video";
+    }
+    return "file";
+}
+
+function classifyMediaError(error: string): "rich_media" | "timeout" | "connection" | "permission" | "unsupported" | "unknown" {
+    const msg = (error || "").toLowerCase();
+    if (msg.includes("rich media transfer failed") || msg.includes("rich media")) return "rich_media";
+    if (msg.includes("timeout")) return "timeout";
+    if (msg.includes("websocket not open") || msg.includes("econn") || msg.includes("connection")) return "connection";
+    if (msg.includes("permission") || msg.includes("forbidden") || msg.includes("denied")) return "permission";
+    if (msg.includes("unsupported") || msg.includes("not supported") || msg.includes("unknown action")) return "unsupported";
+    return "unknown";
+}
+
+function parseGroupIdFromTarget(to: string): number | null {
+    if (!to.startsWith("group:")) return null;
+    const n = parseInt(to.replace("group:", ""), 10);
+    return Number.isFinite(n) ? n : null;
+}
+
+function guessFileName(input: string): string {
+    const local = toLocalPathIfAny(input);
+    const name = path.basename(local || input.split("?")[0].split("#")[0]);
+    if (!name || name === "." || name === "/") return `media_${Date.now()}.bin`;
+    return name;
+}
+
+async function stageLocalFileForContainer(localPath: string, hostSharedDir: string, containerSharedDir: string): Promise<string | null> {
+    if (!hostSharedDir) return null;
+    try {
+        const copiedName = await ensureFileInSharedMedia(localPath, hostSharedDir);
+        return path.posix.join(containerSharedDir.replace(/\\/g, "/"), copiedName);
+    } catch (err) {
+        console.warn(`[QQ] Failed to stage local file into shared media dir: ${String(err)}`);
+        return null;
+    }
+}
+
+async function uploadGroupFile(
+    client: OneBotClient,
+    groupId: number,
+    filePath: string,
+    fileName: string,
+): Promise<{ ok: boolean; data?: any; error?: string }> {
+    try {
+        const data = await (client as any).sendWithResponse("upload_group_file", {
+            group_id: groupId,
+            file: filePath,
+            name: fileName,
+        }, 30000);
+        return { ok: true, data };
+    } catch (err) {
+        return { ok: false, error: String(err) };
+    }
 }
 
 async function findRecentAudioFallback(preferredExt?: string): Promise<string | null> {
@@ -941,6 +1175,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             if (isGroup && allowedGroupIds.length && !allowedGroupIds.includes(groupId)) return;
             
             const isAdmin = adminIds.includes(userId);
+            await ensureTempSessionSlotsLoaded();
+            const threadSessionKey = buildTempThreadKey(account.accountId, isGroup, isGuild, groupId, guildId, channelId, userId);
+            let activeTempSlot = getTempSessionSlot(threadSessionKey);
             const commandTextCandidate = Array.isArray(event.message)
                 ? event.message
                     .filter((seg) => seg?.type === "text")
@@ -966,10 +1203,115 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 text = "/newsession";
                 forceTriggered = true;
             }
+            else if (isGroup && /^\/(临时|tmp|退出临时|exittemp|临时状态|tmpstatus|临时列表|tmplist|临时结束|tmpend)\b/i.test(inlineCommand)) {
+                if (!isAdmin) return;
+                text = inlineCommand;
+                forceTriggered = true;
+            }
+            else if (isGroup && /^\/grok_draw\b/i.test(inlineCommand)) {
+                if (!isAdmin) return;
+                text = inlineCommand;
+                forceTriggered = true;
+            }
 
             if (!isGuild && isAdmin && text.trim().startsWith('/')) {
                 const parts = text.trim().split(/\s+/);
                 const cmd = parts[0];
+                const baseFromIdForCommand = isGroup
+                    ? String(groupId)
+                    : isGuild
+                        ? `guild:${guildId}:${channelId}`
+                        : `qq:user:${userId}`;
+
+                if (cmd === '/临时' || cmd === '/tmp') {
+                    const requested = sanitizeTempSlotName(parts.slice(1).join(' '));
+                    if (!requested) {
+                        const current = activeTempSlot
+                            ? `当前临时会话: ${activeTempSlot}`
+                            : "当前未启用临时会话。";
+                        const usage = `[OpenClawd QQ]
+${current}
+用法:
+/临时 <名称> 进入临时会话
+/退出临时 回到主会话
+/临时状态 查看当前会话
+/临时列表 查看已有临时会话
+/临时结束 结束当前临时会话`;
+                        if (isGroup) client.sendGroupMsg(groupId, usage); else client.sendPrivateMsg(userId, usage);
+                        return;
+                    }
+                    await setTempSessionSlot(threadSessionKey, requested);
+                    activeTempSlot = requested;
+                    const msg = `[OpenClawd QQ]
+✅ 已进入临时会话: ${requested}
+后续消息将写入临时会话，不占用主会话。\n可用命令：/临时状态 /临时列表 /退出临时 /临时结束`;
+                    if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                    return;
+                }
+
+                if (cmd === '/退出临时' || cmd === '/exittemp') {
+                    if (!activeTempSlot) {
+                        const msg = `[OpenClawd QQ]
+当前未在临时会话中。`;
+                        if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                        return;
+                    }
+                    const prev = activeTempSlot;
+                    await setTempSessionSlot(threadSessionKey, null);
+                    activeTempSlot = null;
+                    const msg = `[OpenClawd QQ]
+✅ 已退出临时会话: ${prev}
+当前已回到主会话。`;
+                    if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                    return;
+                }
+
+                if (cmd === '/临时状态' || cmd === '/tmpstatus') {
+                    const effective = buildEffectiveFromId(baseFromIdForCommand, activeTempSlot);
+                    const msg = `[OpenClawd QQ]
+当前会话: ${activeTempSlot ? `临时(${activeTempSlot})` : '主会话'}
+会话键ID: ${effective}`;
+                    if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                    return;
+                }
+
+                if (cmd === '/临时列表' || cmd === '/tmplist') {
+                    const slots = getTempSessionHistory(threadSessionKey);
+                    const rendered = slots.length > 0
+                        ? slots.map((slot, idx) => `${idx + 1}. ${slot}${slot === activeTempSlot ? ' (当前)' : ''}`).join("\n")
+                        : "（暂无）";
+                    const msg = `[OpenClawd QQ]\n临时会话列表：\n${rendered}\n使用 /临时 <名称> 进入会话`;
+                    if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                    return;
+                }
+
+                if (cmd === '/临时结束' || cmd === '/tmpend') {
+                    if (!activeTempSlot) {
+                        const msg = `[OpenClawd QQ]
+当前未在临时会话中。`;
+                        if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                        return;
+                    }
+                    const runtimeForEnd = getQQRuntime();
+                    const tempFromId = buildEffectiveFromId(baseFromIdForCommand, activeTempSlot);
+                    const routeForEnd = runtimeForEnd.channel.routing.resolveAgentRoute({
+                        cfg,
+                        channel: "qq",
+                        accountId: account.accountId,
+                        peer: {
+                            kind: isGuild ? "channel" : (isGroup ? "group" : "direct"),
+                            id: tempFromId,
+                        },
+                    });
+                    const storePathForEnd = runtimeForEnd.channel.session.resolveStorePath(cfg.session?.store, { agentId: routeForEnd.agentId });
+                    await resetSessionByKey(storePathForEnd, routeForEnd.sessionKey);
+                    await setTempSessionSlot(threadSessionKey, null);
+                    const msg = `[OpenClawd QQ]
+✅ 临时会话 ${activeTempSlot} 已结束并清空，已回到主会话。`;
+                    activeTempSlot = null;
+                    if (isGroup) client.sendGroupMsg(groupId, msg); else client.sendPrivateMsg(userId, msg);
+                    return;
+                }
                 if (cmd === '/models' || (cmd === '/model' && (!parts[1] || /^list$/i.test(parts[1])))) {
                     const catalog = await buildModelCatalogText();
                     const chunks = splitLongText(catalog, 2800);
@@ -982,11 +1324,12 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 }
                 if (cmd === '/newsession') {
                     const runtimeForReset = getQQRuntime();
-                    const fromIdForReset = isGroup
+                    const baseFromIdForReset = isGroup
                         ? String(groupId)
                         : isGuild
                             ? `guild:${guildId}:${channelId}`
                             : `qq:user:${userId}`;
+                    const fromIdForReset = buildEffectiveFromId(baseFromIdForReset, activeTempSlot);
                     const routeForReset = runtimeForReset.channel.routing.resolveAgentRoute({
                         cfg,
                         channel: "qq",
@@ -1006,6 +1349,23 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                     else client.sendPrivateMsg(userId, notice);
                     return;
                 }
+
+                if (cmd === '/grok_draw') {
+                    const prompt = text.trim().slice('/grok_draw'.length).trim();
+                    const draw = await grokDrawDirect(prompt);
+                    if (!draw.ok) {
+                        const fail = `[OpenClawd QQ]\n❌ ${draw.error}`;
+                        if (isGroup) client.sendGroupMsg(groupId, `[CQ:at,qq=${userId}] ${fail}`);
+                        else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, fail);
+                        else client.sendPrivateMsg(userId, fail);
+                        return;
+                    }
+                    const okMsg = `[CQ:image,file=${draw.url}]`;
+                    if (isGroup) client.sendGroupMsg(groupId, okMsg);
+                    else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, okMsg);
+                    else client.sendPrivateMsg(userId, okMsg);
+                    return;
+                }
                 if (cmd === '/status') {
                     const activeCount = countActiveTasksForAccount(account.accountId);
                     const statusMsg = `[OpenClawd QQ]\nState: Connected\nSelf ID: ${client.getSelfId()}\nMemory: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB\nActiveTasks: ${activeCount}`;
@@ -1013,7 +1373,16 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                     return;
                 }
                 if (cmd === '/help') {
-                    const helpMsg = `[OpenClawd QQ]\n/status - 状态\n/mute @用户 [分] - 禁言\n/kick @用户 - 踢出\n/help - 帮助`;
+                    const helpMsg = `[OpenClawd QQ]
+/status - 状态
+/临时 <名称> - 进入临时会话
+/退出临时 - 回到主会话
+/临时状态 - 查看当前会话
+/临时结束 - 结束当前临时会话
+/newsession - 重置当前会话
+/mute @用户 [分] - 禁言
+/kick @用户 - 踢出
+/help - 帮助`;
                     if (isGroup) client.sendGroupMsg(groupId, helpMsg); else client.sendPrivateMsg(userId, helpMsg);
                     return;
                 }
@@ -1156,14 +1525,18 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 return;
             }
 
-            let fromId = `qq:user:${userId}`;
+            let baseFromId = `qq:user:${userId}`;
             let conversationLabel = `QQ User ${userId}`;
             if (isGroup) {
-                fromId = String(groupId);
+                baseFromId = String(groupId);
                 conversationLabel = `QQ Group ${groupId}`;
             } else if (isGuild) {
-                fromId = `guild:${guildId}:${channelId}`;
+                baseFromId = `guild:${guildId}:${channelId}`;
                 conversationLabel = `QQ Guild ${guildId} Channel ${channelId}`;
+            }
+            const fromId = buildEffectiveFromId(baseFromId, activeTempSlot);
+            if (activeTempSlot) {
+                conversationLabel = `${conversationLabel} [tmp:${activeTempSlot}]`;
             }
 
             const runtime = getQQRuntime();
@@ -1376,10 +1749,17 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
          const containerSharedDirRaw = typeof runtimeCfg.sharedMediaContainerDir === "string" ? runtimeCfg.sharedMediaContainerDir.trim() : "";
          const containerSharedDir = containerSharedDirRaw || "/openclaw_media";
 
-         const audioLikeSource = isAudioFile(mediaUrl);
+         const sourceKind = detectMediaKind(mediaUrl);
+         const groupId = parseGroupIdFromTarget(to);
+         const localSourcePath = toLocalPathIfAny(mediaUrl);
+         let stagedSharedPath: string | null = null;
+         if (localSourcePath && hostSharedDir) {
+             stagedSharedPath = await stageLocalFileForContainer(localSourcePath, hostSharedDir, containerSharedDir);
+         }
+
+         const audioLikeSource = sourceKind === "audio";
          let stagedAudioFile: string | null = null;
          if (audioLikeSource && hostSharedDir) {
-             const localSourcePath = toLocalPathIfAny(mediaUrl);
              if (localSourcePath) {
                  try {
                      const copiedName = await ensureFileInSharedMedia(localSourcePath, hostSharedDir);
@@ -1389,8 +1769,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                  }
              }
          }
-         
-         const finalUrl = await resolveMediaUrl(mediaUrl);
+         const finalUrl = sourceKind === "image" || sourceKind === "audio"
+             ? await resolveMediaUrl(mediaUrl)
+             : mediaUrl;
 
          let textAck: any = null;
          if (text && text.trim()) {
@@ -1406,10 +1787,11 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 
          const mediaMessage: OneBotMessage = [];
          if (replyTo && !(text && text.trim())) mediaMessage.push({ type: "reply", data: { id: String(replyTo) } });
-         const sourceAudioLike = isAudioFile(mediaUrl);
-         const sourceImageLike = isImageFile(mediaUrl);
-         const audioLike = sourceAudioLike || isAudioFile(finalUrl);
-         const imageLike = !audioLike && (sourceImageLike || isImageFile(finalUrl) || finalUrl.startsWith("base64://"));
+         const mediaKind = detectMediaKind(mediaUrl, finalUrl);
+         const audioLike = mediaKind === "audio";
+         const imageLike = mediaKind === "image";
+         const videoLike = mediaKind === "video";
+         const fileLike = mediaKind === "file";
 
          if (audioLike && textAck) {
              const configuredDelay = Number(runtimeCfg.rateLimitMs ?? 1000);
@@ -1431,10 +1813,53 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
              }
              mediaMessage.push({ type: "record", data: { file: recordFile } });
          }
-         else mediaMessage.push({ type: "file", data: { file: finalUrl } });
+         else if (videoLike) {
+             const videoFile = stagedSharedPath || finalUrl;
+             mediaMessage.push({ type: "video", data: { file: videoFile } });
+         } else {
+             if (groupId && (stagedSharedPath || localSourcePath)) {
+                 const uploadPath = stagedSharedPath || localSourcePath!;
+                 const uploadName = guessFileName(mediaUrl);
+                 const uploadAck = await uploadGroupFile(client, groupId, uploadPath, uploadName);
+                 if (uploadAck.ok) {
+                     return {
+                         channel: "qq",
+                         sent: true,
+                         textSent: Boolean(textAck),
+                         mediaSent: true,
+                         transport: "upload_group_file",
+                         mediaKind: "file",
+                         messageId: textAck?.message_id ?? textAck?.messageId ?? null,
+                     };
+                 }
+                 console.warn(`[QQ] upload_group_file failed (primary path): ${uploadAck.error || "unknown"}`);
+             }
+             mediaMessage.push({ type: "file", data: { file: stagedSharedPath || finalUrl, name: guessFileName(mediaUrl) } });
+         }
 
          const mediaAck = await sendOneBotMessageWithAck(client, to, mediaMessage);
          if (!mediaAck.ok) {
+             const primaryError = mediaAck.error || "unknown";
+             const errorClass = classifyMediaError(primaryError);
+             if ((videoLike || fileLike) && groupId && (stagedSharedPath || localSourcePath)) {
+                 const uploadPath = stagedSharedPath || localSourcePath!;
+                 const uploadName = guessFileName(mediaUrl);
+                 const uploadAck = await uploadGroupFile(client, groupId, uploadPath, uploadName);
+                 if (uploadAck.ok) {
+                     return {
+                         channel: "qq",
+                         sent: true,
+                         textSent: Boolean(textAck),
+                         mediaSent: true,
+                         fallbackSent: true,
+                         fallbackType: "upload_group_file",
+                         mediaKind: videoLike ? "video" : "file",
+                         errorClass,
+                         error: `Primary media path failed; fallback upload_group_file succeeded. reason=${primaryError}`,
+                         messageId: textAck?.message_id ?? textAck?.messageId ?? null,
+                     };
+                 }
+             }
              if (audioLike) {
                  const fileFallback: OneBotMessage = [];
                  if (replyTo && !(text && text.trim())) fileFallback.push({ type: "reply", data: { id: String(replyTo) } });
@@ -1443,7 +1868,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                      return {
                          channel: "qq",
                          sent: Boolean(textAck),
-                         error: `Media send failed: ${mediaAck.error || "unknown"}`,
+                         error: `Media send failed: ${primaryError}`,
+                         errorClass,
+                         mediaKind: "audio",
                          textSent: Boolean(textAck),
                          mediaSent: false,
                          messageId: textAck?.message_id ?? textAck?.messageId ?? null,
@@ -1468,7 +1895,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                          mediaSent: false,
                          fallbackSent: true,
                          fallbackType: "file",
-                         error: `Audio(record) failed; fallback file sent. reason=${mediaAck.error || "unknown"}`,
+                         errorClass,
+                         mediaKind: "audio",
+                         error: `Audio(record) failed; fallback file sent. reason=${primaryError}`,
                          messageId: fallbackAck.data?.message_id ?? fallbackAck.data?.messageId ?? textAck?.message_id ?? textAck?.messageId ?? null,
                      };
                  }
@@ -1476,7 +1905,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
              return {
                  channel: "qq",
                  sent: Boolean(textAck),
-                 error: `Media send failed: ${mediaAck.error || "unknown"}`,
+                 error: `Media send failed: ${primaryError}`,
+                 errorClass,
+                 mediaKind: mediaKind,
                  textSent: Boolean(textAck),
                  mediaSent: false,
                  messageId: textAck?.message_id ?? textAck?.messageId ?? null,
@@ -1487,6 +1918,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
              sent: true,
              textSent: Boolean(textAck),
              mediaSent: true,
+             mediaKind,
              messageId: mediaAck.data?.message_id ?? mediaAck.data?.messageId ?? textAck?.message_id ?? textAck?.messageId ?? null,
          };
     },
@@ -1504,6 +1936,5 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
           looksLikeId: (id) => /^\d{5,12}$/.test(id) || /^group:\d{5,12}$/.test(id) || /^guild:/.test(id),
           hint: "QQ号, 群号 (group:123), 或频道 (guild:id:channel)",
       }
-  },
-  setup: { resolveAccountId: ({ accountId }) => normalizeAccountId(accountId) }
+  }
 };

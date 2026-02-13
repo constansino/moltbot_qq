@@ -35,6 +35,8 @@ logs/
 
 # Runtime data
 deploy/napcat/napcat/
+deploy/napcat/shared_media/*
+!deploy/napcat/shared_media/.gitkeep
 
 # local secrets
 deploy/napcat/.env

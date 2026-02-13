@@ -228,7 +228,14 @@ openclaw setup qq
 *   群聊模型命令支持（仅管理员）：
     *   `@机器人 /models` 可直接触发模型列表（仅管理员）。
     *   `@机器人 /model`、`@机器人 /model 28` 也仅管理员可触发。
-    *   `@机器人 /newsession` 或 `唤醒词 /newsession` 可重置当前会话（仅管理员）。
+    *   `@机器人 /newsession` 或 `唤醒词 /newsession` 可重置**当前会话槽**（仅管理员）。
+
+*   临时会话槽（同群分话题，类似 tmux，仅管理员）：
+    *   `/临时 <名称>` 进入/创建临时会话（示例：`/临时 检查ssh`，会保留完整名称，不再被截成 `ssh`）。
+    *   `/临时状态` 查看当前会话槽与会话键。
+    *   `/临时列表` 查看本群最近使用过的临时会话（当前会话会标注“当前”）。
+    *   `/退出临时` 回到主会话（不删除临时会话内容）。
+    *   `/临时结束` 清空并结束当前临时会话，然后回主会话。
 
 *   `/status`
     *   查看机器人运行状态（内存占用、连接状态、Self ID）。
@@ -266,6 +273,21 @@ openclaw setup qq
     # 发送频道消息
     openclaw send qq guild:GUILD_ID:CHANNEL_ID "频道消息"
     ```
+
+4.  **最小复现：QQ 文件/视频发送链路（含完整请求回包）**
+    ```bash
+    node scripts/qq-send-media-repro.mjs \
+      --ws ws://127.0.0.1:3001 \
+      --token 你的OneBotToken \
+      --group 883766069 \
+      --mp4 /openclaw_media/test_short.mp4 \
+      --txt /openclaw_media/test.txt
+    ```
+    - 脚本会依次调用：
+      - `send_group_msg` + `video` 段
+      - `send_group_msg` + `file` 段
+      - `upload_group_file`（mp4/txt）
+    - 每一步都会打印完整 `-> 请求` 与 `<- 响应` JSON，便于对照 NapCat 日志定位 `rich media transfer failed`。
 
 ### 🔐 管理员/黑名单（防盗刷）推荐配置
 
